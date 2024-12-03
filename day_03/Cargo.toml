@@ -1,0 +1,9 @@
+[package]
+name = "day_03"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.94"
+regex = "1.11.1"
+thiserror = "2.0.4"
