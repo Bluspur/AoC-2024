@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use anyhow::Result;
+use rayon::prelude::*;
 use thiserror::Error;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -12,7 +13,7 @@ enum PosState {
 /// 2d top down map of the patrol area.
 /// Origin point in the upper left position.
 /// Assumed to be a regular in shape, i.e. all rows are the same length
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 struct Map(Vec<Vec<PosState>>);
 
 impl Map {
@@ -32,6 +33,9 @@ impl Map {
 
         Some(self.0[y][x])
     }
+    fn set(&mut self, x: usize, y: usize, pos_state: PosState) {
+        self.0[y][x] = pos_state
+    }
 }
 
 enum Translation {
@@ -49,7 +53,7 @@ impl Translation {
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 enum Heading {
     N,
     E,
@@ -76,7 +80,7 @@ impl Heading {
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 struct Guard {
     position: (usize, usize),
     heading: Heading,
@@ -155,6 +159,10 @@ fn main() -> Result<()> {
     let part_1 = solve_part_1(&map, guard);
     println!("Part 1: {}", part_1);
 
+    // Part 2
+    let part_2 = solve_part_2_par(map, guard);
+    println!("Part 2: {}", part_2);
+
     Ok(())
 }
 
@@ -178,39 +186,134 @@ fn solve_part_1(map: &Map, mut guard: Guard) -> usize {
     visited.len()
 }
 
-fn solve_part_2(map: &Map, mut guard: Guard) -> usize {
-    let mut corners = Vec::new();
-    let mut path = vec![guard.position];
-
-    let mut i = 0;
-    while let Some(new_guard) = guard.advance(map) {
-        path.push(new_guard.position);
-
-        if new_guard.heading != guard.heading {
-            println!("Corner ({},{})", new_guard.position.0, new_guard.position.1);
-            corners.push((new_guard, i));
-        }
-
-        guard = new_guard;
-        i += 1;
+// Brute force our way through this
+fn solve_part_2(mut map: Map, guard: Guard) -> usize {
+    let mut count = 0;
+    let mut call_counter = 0;
+    // This is an optimization where the original path is collected, so that only traversed tiles are checked.
+    let mut path = HashSet::new();
+    let mut origin = guard;
+    while let Some(current) = origin.advance(&map) {
+        path.insert(current.position);
+        origin = current
     }
 
-    0
+    for (x, y) in path {
+        let old = map.get_position(x, y).unwrap();
+
+        // Don't bother with closed squares or the origin point
+        if old != PosState::O || (x, y) == guard.position {
+            continue;
+        }
+
+        call_counter += 1;
+
+        let mut guard = guard;
+
+        let mut visited = HashSet::new();
+        // Set the square to be an obstacle
+        map.set(x, y, PosState::X);
+
+        visited.insert(guard);
+
+        while let Some(current) = guard.advance(&map) {
+            let loop_point = !visited.insert(current);
+
+            if loop_point {
+                count += 1;
+                break;
+            }
+
+            guard = current
+        }
+
+        // Set the square back again
+        map.set(x, y, PosState::O);
+    }
+
+    println!("{} positions were examined", call_counter);
+
+    count
 }
 
+fn solve_part_2_par(map: Map, guard: Guard) -> usize {
+    // This is an optimization where the original path is collected, so that only traversed tiles are checked.
+    let mut path = HashSet::new();
+    let mut origin = guard;
+
+    while let Some(current) = origin.advance(&map) {
+        path.insert(current.position);
+        origin = current;
+    }
+
+    // Parallelize the `for` loop using Rayon
+    let results: Vec<usize> = path
+        .par_iter()
+        .filter_map(|&(x, y)| {
+            let old = map.get_position(x, y).unwrap();
+
+            // Skip closed squares or the origin point
+            if old != PosState::O || (x, y) == guard.position {
+                return None;
+            }
+
+            let mut map_clone = map.clone(); // Clone the map for independent processing
+            let mut guard = guard;
+
+            let mut visited = HashSet::new();
+
+            // Set the square to be an obstacle
+            map_clone.set(x, y, PosState::X);
+
+            visited.insert(guard);
+
+            while let Some(current) = guard.advance(&map_clone) {
+                let loop_point = !visited.insert(current);
+
+                if loop_point {
+                    // Restore the map to its original state before exiting
+                    map_clone.set(x, y, PosState::O);
+                    return Some(1); // Found a loop
+                }
+
+                guard = current;
+            }
+
+            // Restore the map to its original state
+            map_clone.set(x, y, PosState::O);
+
+            None // No loop found
+        })
+        .collect();
+
+    // Aggregate results from all parallel computations
+    let count = results.into_iter().sum::<usize>();
+
+    println!("{} positions were examined", path.len());
+
+    count
+}
+
+/*
+* These were written during a moment of absolute insanity, they aren't needed. I am keeping them to remind myself.
+*/
 /// B is assumed to the right angle
-fn calc_opposite_corner(a: (usize, usize), b: (usize, usize), c: (usize, usize)) -> (usize, usize) {
+fn _calc_opposite_corner(
+    a: (usize, usize),
+    b: (usize, usize),
+    c: (usize, usize),
+) -> (usize, usize) {
     (a.0 + c.0 - b.0, a.1 + c.1 - b.1)
 }
 
-fn right_angle_corner(
+fn _right_angle_corner(
     a: (usize, usize),
     b: (usize, usize),
     c: (usize, usize),
 ) -> Option<(usize, usize)> {
-    let ab_sq = sq_len(a, b);
-    let bc_sq = sq_len(b, c);
-    let ca_sq = sq_len(c, a);
+    let ab_sq = _sq_len(a, b);
+    let bc_sq = _sq_len(b, c);
+    let ca_sq = _sq_len(c, a);
 
     if ab_sq + bc_sq == ca_sq {
         Some(b)
@@ -223,7 +326,7 @@ fn right_angle_corner(
     }
 }
 
-fn sq_len(a: (usize, usize), b: (usize, usize)) -> usize {
+fn _sq_len(a: (usize, usize), b: (usize, usize)) -> usize {
     let x_sq = if b.0 >= a.0 {
         (b.0 - a.0).pow(2)
     } else {
@@ -319,7 +422,7 @@ mod test {
             heading: Heading::N,
         };
 
-        let actual = solve_part_2(&map, guard);
+        let actual = solve_part_2(map, guard);
 
         assert_eq!(6, actual);
     }
@@ -328,8 +431,8 @@ mod test {
     fn test_is_right_angle_triangle() {
         let (a, b, c) = ((4, 1), (8, 1), (8, 6));
 
-        assert_eq!(right_angle_corner(a, b, c), Some(b));
-        assert_eq!(right_angle_corner(b, a, c), Some(b));
-        assert_ne!(right_angle_corner(a, b, c), Some(a));
+        assert_eq!(_right_angle_corner(a, b, c), Some(b));
+        assert_eq!(_right_angle_corner(b, a, c), Some(b));
+        assert_ne!(_right_angle_corner(a, b, c), Some(a));
     }
 }
