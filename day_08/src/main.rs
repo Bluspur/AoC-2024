@@ -14,6 +14,10 @@ impl Coordinate {
     fn new(x: i32, y: i32) -> Coordinate {
         Coordinate { x, y }
     }
+
+    fn in_bounds(&self, x_limit: usize, y_limit: usize) -> bool {
+        self.x >= 0 && self.x < x_limit as i32 && self.y >= 0 && self.y < y_limit as i32
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -42,11 +46,24 @@ impl Map {
         antinodes.len()
     }
 
+    fn count_unique_resonant_antinodes(&self) -> usize {
+        let mut antinodes = HashSet::new();
+
+        for antenna_frequency in &self.antennas {
+            for (a, b) in antenna_frequency.iter().tuple_combinations() {
+                let resonant_antinodes =
+                    calculate_resonant_antinodes(*a, *b, self.width, self.height);
+                for antinode in resonant_antinodes {
+                    antinodes.insert(antinode);
+                }
+            }
+        }
+
+        antinodes.len()
+    }
+
     fn in_bounds(&self, coordinate: Coordinate) -> bool {
-        coordinate.x >= 0
-            && coordinate.x < self.width as i32
-            && coordinate.y >= 0
-            && coordinate.y < self.height as i32
+        coordinate.in_bounds(self.width, self.height)
     }
 }
 
@@ -59,6 +76,44 @@ fn calculate_antinodes(a: Coordinate, b: Coordinate) -> (Coordinate, Coordinate)
     let d = Coordinate::new(a.x - dx, a.y - dy);
 
     (c, d)
+}
+
+//
+fn calculate_resonant_antinodes(
+    a: Coordinate,
+    b: Coordinate,
+    x_limit: usize,
+    y_limit: usize,
+) -> Vec<Coordinate> {
+    let mut antinodes = Vec::new();
+
+    // Calculate the difference
+    let dx = b.x - a.x;
+    let dy = b.y - a.y;
+
+    // See calculate_antinodes, but now an antinode can occur at any coordinate exactly in line with two antennas
+    let mut n = 0;
+    loop {
+        let c = Coordinate::new(a.x + n * dx, a.y + n * dy);
+        if !c.in_bounds(x_limit, y_limit) {
+            break;
+        }
+        antinodes.push(c);
+        n += 1;
+    }
+
+    // Generate points in the negative direction
+    n = -1;
+    loop {
+        let c = Coordinate::new(a.x + n * dx, a.y + n * dy);
+        if !c.in_bounds(x_limit, y_limit) {
+            break;
+        }
+        antinodes.push(c);
+        n -= 1;
+    }
+
+    antinodes
 }
 
 #[derive(Debug, Error)]
@@ -91,7 +146,7 @@ fn parse_input(input: &str) -> Result<Map, MapParseError> {
         })
     })?;
 
-    let antennas = antennas.into_iter().map(|(_, v)| v).collect();
+    let antennas = antennas.into_values().collect();
 
     Ok(Map {
         antennas,
@@ -116,11 +171,19 @@ fn main() -> Result<()> {
     let part_1 = solve_part_1(&map);
     println!("Part 1: {}", part_1);
 
+    // Part 2
+    let part_2 = solve_part_2(&map);
+    println!("Part 2: {}", part_2);
+
     Ok(())
 }
 
 fn solve_part_1(map: &Map) -> usize {
     map.count_unique_antinodes()
+}
+
+fn solve_part_2(map: &Map) -> usize {
+    map.count_unique_resonant_antinodes()
 }
 
 #[cfg(test)]
@@ -169,10 +232,38 @@ mod tests {
     }
 
     #[test]
+    fn test_calculate_resonant_antinodes() {
+        let a = Coordinate::new(2, 1);
+        let b = Coordinate::new(1, 2);
+
+        let antinodes = calculate_resonant_antinodes(a, b, 4, 4);
+
+        // Cast to a set because the order of the antinodes is not important
+        let expected: HashSet<Coordinate> = HashSet::from_iter(vec![
+            Coordinate::new(0, 3),
+            Coordinate::new(1, 2),
+            Coordinate::new(2, 1),
+            Coordinate::new(3, 0),
+        ]);
+
+        let actual = HashSet::from_iter(antinodes);
+
+        assert_eq!(expected, actual);
+    }
+
+    #[test]
     fn test_count_unique_antinodes() {
         let map = create_test_map();
         let actual = map.count_unique_antinodes();
 
         assert_eq!(actual, 14);
+    }
+
+    #[test]
+    fn test_count_unique_resonant_antinodes() {
+        let map = create_test_map();
+        let actual = map.count_unique_resonant_antinodes();
+
+        assert_eq!(actual, 34);
     }
 }
