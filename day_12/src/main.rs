@@ -7,19 +7,22 @@ use anyhow::Result;
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy)]
-struct Region {
+pub struct Region {
     area: usize,
     perimeter: usize,
 }
 
 impl Region {
+    pub fn new(area: usize, perimeter: usize) -> Self {
+        Region { area, perimeter }
+    }
     fn price(&self) -> usize {
         self.area * self.perimeter
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
-struct Coordinate {
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy, PartialOrd, Ord)]
+pub struct Coordinate {
     x: i32,
     y: i32,
 }
@@ -33,7 +36,7 @@ impl Coordinate {
         self.x >= 0 && self.x < width && self.y >= 0 && self.y < height
     }
 
-    fn neighbours(&self, width: i32, height: i32) -> Vec<Coordinate> {
+    fn neighbours_bounded(&self, width: i32, height: i32) -> Vec<Coordinate> {
         let mut neighbours = Vec::new();
         let directions = [(0, 1), (1, 0), (0, -1), (-1, 0)];
 
@@ -46,14 +49,28 @@ impl Coordinate {
 
         neighbours
     }
+
+    /// All neighbours of a coordinate, including ordinals.
+    fn all_neighbours(&self) -> [Coordinate; 8] {
+        [
+            Coordinate::new(self.x - 1, self.y - 1), // NW
+            Coordinate::new(self.x, self.y - 1),     // N
+            Coordinate::new(self.x + 1, self.y - 1), // NE
+            Coordinate::new(self.x - 1, self.y),     // W
+            Coordinate::new(self.x + 1, self.y),     // E
+            Coordinate::new(self.x - 1, self.y + 1), // SW
+            Coordinate::new(self.x, self.y + 1),     // S
+            Coordinate::new(self.x + 1, self.y + 1), // SE
+        ]
+    }
 }
 
-struct Graph {
+pub struct Graph {
     nodes: HashMap<Coordinate, Node>,
 }
 
 impl Graph {
-    fn find_regions(self) -> Regions {
+    fn find_regions(&self) -> Regions {
         let mut regions = Vec::new();
         // HashSet of all the coordinates which have been completly handled.
         let mut completed = HashSet::<Coordinate>::new();
@@ -107,20 +124,22 @@ impl Graph {
                 perimeter,
             };
 
-            println!("Region {}: {:?}", token, new_region);
-
             // Add the new region
-            regions.push(new_region);
+            regions.push((new_region, explored.clone()));
             // Update the completed Set with all the explored positions.
             completed.extend(explored);
         }
 
         Regions(regions)
     }
+
+    pub fn new(nodes: HashMap<Coordinate, Node>) -> Self {
+        Graph { nodes }
+    }
 }
 
 #[derive(Debug, Error)]
-enum GraphError {
+pub enum GraphError {
     #[error("Empty input")]
     EmptyInput,
     #[error("Invalid token: {0}")]
@@ -148,8 +167,7 @@ impl FromStr for Graph {
                 }
                 let (x, y) = (x as i32, y as i32);
                 let coordinate = Coordinate::new(x, y);
-                let neighbours = coordinate.neighbours(width as i32, height as i32);
-                println!("{:?} -> {:?}", coordinate, neighbours.len());
+                let neighbours = coordinate.neighbours_bounded(width as i32, height as i32);
                 let node = Node::new(c, neighbours);
                 nodes.insert(coordinate, node);
             }
@@ -159,15 +177,7 @@ impl FromStr for Graph {
     }
 }
 
-struct Regions(Vec<Region>);
-
-impl Regions {
-    fn total_price(&self) -> usize {
-        self.0.iter().map(|r| r.price()).sum()
-    }
-}
-
-struct Node {
+pub struct Node {
     token: char,
     connections: Vec<Coordinate>,
 }
@@ -178,6 +188,75 @@ impl Node {
     }
 }
 
+struct Regions(Vec<(Region, HashSet<Coordinate>)>);
+
+impl Regions {
+    fn total_price(&self) -> usize {
+        self.0.iter().map(|(r, _)| r.price()).sum()
+    }
+
+    fn total_discounted_price(&self) -> usize {
+        self.0
+            .iter()
+            .map(|(r, set)| r.area * count_sides(set))
+            .sum()
+    }
+}
+
+fn count_sides(coords: &HashSet<Coordinate>) -> usize {
+    let mut sides = 0;
+
+    let local_grids = coords
+        .iter()
+        .map(|c| neighbourhood_grid(*c, coords))
+        .collect::<Vec<[bool; 9]>>();
+
+    for grid in local_grids {
+        if !grid[3] && !grid[1] {
+            sides += 1; // NW corner
+        }
+        if !grid[1] && !grid[5] {
+            sides += 1; // NE corner
+        }
+        if !grid[5] && !grid[7] {
+            sides += 1; // SE corner
+        }
+        if !grid[7] && !grid[3] {
+            sides += 1; // SW corner
+        }
+        if grid[3] && grid[1] && !grid[0] {
+            sides += 1; // NW inner
+        }
+        if grid[1] && grid[5] && !grid[2] {
+            sides += 1; // NE inner
+        }
+        if grid[5] && grid[7] && !grid[8] {
+            sides += 1; // SE inner
+        }
+        if grid[7] && grid[3] && !grid[6] {
+            sides += 1; // SW inner
+        }
+    }
+
+    sides
+}
+
+fn neighbourhood_grid(coord: Coordinate, set: &HashSet<Coordinate>) -> [bool; 9] {
+    let neighbours = coord.all_neighbours();
+
+    [
+        set.contains(&neighbours[0]),
+        set.contains(&neighbours[1]),
+        set.contains(&neighbours[2]),
+        set.contains(&neighbours[3]),
+        true,
+        set.contains(&neighbours[4]),
+        set.contains(&neighbours[5]),
+        set.contains(&neighbours[6]),
+        set.contains(&neighbours[7]),
+    ]
+}
+
 fn main() -> Result<()> {
     let input = std::fs::read_to_string("input.txt")?;
     let graph = input.parse::<Graph>()?;
@@ -185,6 +264,10 @@ fn main() -> Result<()> {
     // Part 1
     let part_1 = graph.find_regions().total_price();
     println!("Part 1: {}", part_1);
+
+    // Part 2
+    let part_2 = graph.find_regions().total_discounted_price();
+    println!("Part 2: {}", part_2);
 
     Ok(())
 }
@@ -194,145 +277,80 @@ mod test {
     use super::*;
 
     const TEST_INPUT: &str = r#"
-    AAAA
-    BBCD
-    BBCC
-    EEEC
+        AAAA
+        BBCD
+        BBCC
+        EEEC
     "#;
 
+    /// Helper function to create a test graph.
+    /// Same as the one described in TEST_INPUT.
     fn create_test_graph() -> Graph {
-        Graph {
-            nodes: [
-                (
-                    Coordinate::new(0, 0),
-                    Node::new('A', vec![Coordinate::new(0, 1), Coordinate::new(1, 0)]),
-                ),
-                (
-                    Coordinate::new(1, 0),
-                    Node::new('A', vec![
-                        Coordinate::new(0, 0),
-                        Coordinate::new(1, 1),
-                        Coordinate::new(2, 0),
-                    ]),
-                ),
-                (
-                    Coordinate::new(2, 0),
-                    Node::new('A', vec![
-                        Coordinate::new(1, 0),
-                        Coordinate::new(2, 1),
-                        Coordinate::new(3, 0),
-                    ]),
-                ),
-                (
-                    Coordinate::new(3, 0),
-                    Node::new('A', vec![Coordinate::new(2, 0), Coordinate::new(3, 1)]),
-                ),
-                (
-                    Coordinate::new(0, 1),
-                    Node::new('B', vec![
-                        Coordinate::new(0, 0),
-                        Coordinate::new(1, 1),
-                        Coordinate::new(0, 2),
-                    ]),
-                ),
-                (
-                    Coordinate::new(1, 1),
-                    Node::new('B', vec![
-                        Coordinate::new(0, 1),
-                        Coordinate::new(1, 2),
-                        Coordinate::new(2, 1),
-                        Coordinate::new(1, 0),
-                    ]),
-                ),
-                (
-                    Coordinate::new(2, 1),
-                    Node::new('C', vec![
-                        Coordinate::new(1, 1),
-                        Coordinate::new(2, 0),
-                        Coordinate::new(3, 1),
-                        Coordinate::new(2, 2),
-                    ]),
-                ),
-                (
-                    Coordinate::new(3, 1),
-                    Node::new('D', vec![
-                        Coordinate::new(2, 1),
-                        Coordinate::new(3, 0),
-                        Coordinate::new(3, 2),
-                    ]),
-                ),
-                (
-                    Coordinate::new(0, 2),
-                    Node::new('B', vec![
-                        Coordinate::new(0, 1),
-                        Coordinate::new(1, 2),
-                        Coordinate::new(0, 3),
-                    ]),
-                ),
-                (
-                    Coordinate::new(1, 2),
-                    Node::new('B', vec![
-                        Coordinate::new(0, 2),
-                        Coordinate::new(2, 2),
-                        Coordinate::new(1, 1),
-                        Coordinate::new(1, 3),
-                    ]),
-                ),
-                (
-                    Coordinate::new(2, 2),
-                    Node::new('C', vec![
-                        Coordinate::new(1, 2),
-                        Coordinate::new(3, 2),
-                        Coordinate::new(2, 1),
-                        Coordinate::new(2, 3),
-                    ]),
-                ),
-                (
-                    Coordinate::new(3, 2),
-                    Node::new('C', vec![
-                        Coordinate::new(2, 2),
-                        Coordinate::new(3, 1),
-                        Coordinate::new(3, 3),
-                    ]),
-                ),
-                (
-                    Coordinate::new(0, 3),
-                    Node::new('E', vec![Coordinate::new(0, 2), Coordinate::new(1, 3)]),
-                ),
-                (
-                    Coordinate::new(1, 3),
-                    Node::new('E', vec![
-                        Coordinate::new(0, 3),
-                        Coordinate::new(1, 2),
-                        Coordinate::new(2, 3),
-                    ]),
-                ),
-                (
-                    Coordinate::new(2, 3),
-                    Node::new('E', vec![
-                        Coordinate::new(1, 3),
-                        Coordinate::new(2, 2),
-                        Coordinate::new(3, 3),
-                    ]),
-                ),
-                (
-                    Coordinate::new(3, 3),
-                    Node::new('C', vec![Coordinate::new(2, 3), Coordinate::new(3, 2)]),
-                ),
-            ]
-            .into(),
+        /// Helper function to create a coordinate.
+        fn c(x: i32, y: i32) -> Coordinate {
+            Coordinate::new(x, y)
         }
+
+        /// Helper function to create a node.
+        fn n(token: char, connections: Vec<Coordinate>) -> Node {
+            Node::new(token, connections)
+        }
+
+        let nodes = vec![
+            (c(0, 0), n('A', vec![c(0, 1), c(1, 0)])),
+            (c(1, 0), n('A', vec![c(0, 0), c(1, 1), c(2, 0)])),
+            (c(2, 0), n('A', vec![c(1, 0), c(2, 1), c(3, 0)])),
+            (c(3, 0), n('A', vec![c(2, 0), c(3, 1)])),
+            (c(0, 1), n('B', vec![c(0, 0), c(1, 1), c(0, 2)])),
+            (c(1, 1), n('B', vec![c(0, 1), c(1, 2), c(2, 1), c(1, 0)])),
+            (c(2, 1), n('C', vec![c(1, 1), c(2, 0), c(3, 1), c(2, 2)])),
+            (c(3, 1), n('D', vec![c(2, 1), c(3, 0), c(3, 2)])),
+            (c(0, 2), n('B', vec![c(0, 1), c(1, 2), c(0, 3)])),
+            (c(1, 2), n('B', vec![c(0, 2), c(2, 2), c(1, 1), c(1, 3)])),
+            (c(2, 2), n('C', vec![c(1, 2), c(3, 2), c(2, 1), c(2, 3)])),
+            (c(3, 2), n('C', vec![c(2, 2), c(3, 1), c(3, 3)])),
+            (c(0, 3), n('E', vec![c(0, 2), c(1, 3)])),
+            (c(1, 3), n('E', vec![c(0, 3), c(1, 2), c(2, 3)])),
+            (c(2, 3), n('E', vec![c(1, 3), c(2, 2), c(3, 3)])),
+            (c(3, 3), n('C', vec![c(2, 3), c(3, 2)])),
+        ];
+
+        Graph::new(nodes.into_iter().collect())
     }
 
     #[test]
-    fn parse_graph() {
+    fn test_parse_graph() {
         let graph = TEST_INPUT.parse::<Graph>().unwrap();
 
         assert_eq!(graph.nodes.len(), 16);
     }
 
     #[test]
-    fn find_regions() {
+    fn test_count_sides() {
+        let coords = [
+            Coordinate::new(0, 0),
+            Coordinate::new(1, 0),
+            Coordinate::new(2, 0),
+            Coordinate::new(3, 0),
+        ]
+        .into();
+        let expected = 4;
+        let actual = count_sides(&coords);
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn test_solve_part_2() {
+        let graph = create_test_graph();
+        let regions = graph.find_regions();
+        let expected = 80;
+
+        assert_eq!(regions.total_discounted_price(), expected);
+    }
+
+    #[test]
+    fn test_find_regions() {
         let graph = create_test_graph();
         let regions = graph.find_regions();
 
@@ -340,7 +358,7 @@ mod test {
     }
 
     #[test]
-    fn total_price() {
+    fn test_total_price() {
         let graph = create_test_graph();
         let regions = graph.find_regions();
         let expected = 140;
@@ -350,89 +368,23 @@ mod test {
     }
 
     #[test]
-    fn calculate_price() {
+    fn test_calculate_price() {
         let regions = vec![
-            (
-                Region {
-                    area: 12,
-                    perimeter: 18,
-                },
-                216,
-            ),
-            (
-                Region {
-                    area: 4,
-                    perimeter: 8,
-                },
-                32,
-            ),
-            (
-                Region {
-                    area: 14,
-                    perimeter: 28,
-                },
-                392,
-            ),
-            (
-                Region {
-                    area: 10,
-                    perimeter: 18,
-                },
-                180,
-            ),
-            (
-                Region {
-                    area: 13,
-                    perimeter: 20,
-                },
-                260,
-            ),
-            (
-                Region {
-                    area: 11,
-                    perimeter: 20,
-                },
-                220,
-            ),
-            (
-                Region {
-                    area: 1,
-                    perimeter: 4,
-                },
-                4,
-            ),
-            (
-                Region {
-                    area: 13,
-                    perimeter: 18,
-                },
-                234,
-            ),
-            (
-                Region {
-                    area: 14,
-                    perimeter: 22,
-                },
-                308,
-            ),
-            (
-                Region {
-                    area: 5,
-                    perimeter: 12,
-                },
-                60,
-            ),
-            (
-                Region {
-                    area: 3,
-                    perimeter: 8,
-                },
-                24,
-            ),
+            (Region::new(12, 18), 216),
+            (Region::new(4, 8), 32),
+            (Region::new(14, 28), 392),
+            (Region::new(10, 18), 180),
+            (Region::new(13, 20), 260),
+            (Region::new(11, 20), 220),
+            (Region::new(1, 4), 4),
+            (Region::new(13, 18), 234),
+            (Region::new(14, 22), 308),
+            (Region::new(5, 12), 60),
+            (Region::new(3, 8), 24),
         ];
 
-        for (region, expected) in regions {
-            assert_eq!(region.price(), expected);
+        for (region, expected_price) in regions {
+            assert_eq!(region.price(), expected_price);
         }
     }
 }
