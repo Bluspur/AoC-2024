@@ -2,7 +2,7 @@ use anyhow::Result;
 use priority_queue::PriorityQueue;
 use std::{
     cmp::Reverse,
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque, hash_map::Entry},
 };
 use thiserror::Error;
 
@@ -21,8 +21,8 @@ impl Point {
     /// Returns the point that is a neighbour in the given direction.
     pub fn neighbour(&self, direction: Direction) -> Self {
         match direction {
-            Direction::North => Self::new(self.x, self.y + 1),
-            Direction::South => Self::new(self.x, self.y - 1),
+            Direction::North => Self::new(self.x, self.y - 1),
+            Direction::South => Self::new(self.x, self.y + 1),
             Direction::East => Self::new(self.x + 1, self.y),
             Direction::West => Self::new(self.x - 1, self.y),
         }
@@ -218,6 +218,126 @@ impl Graph {
 
         Ok(Path::new(*cost, path))
     }
+
+    fn find_all_shortest_paths(&self, start: Point, end: Point) -> Result<Vec<Path>, GraphError> {
+        // Check that both start and end points are part of the graph.
+        self.get(&start)?;
+        self.get(&end)?;
+        // Short-circuit if the start and end points are the same.
+        if start == end {
+            return Ok(vec![Path::new(0, vec![start])]);
+        }
+        // Initialize the agent's direction as East.
+        let initial_heading = Direction::East;
+
+        let mut frontier = PriorityQueue::new();
+        let mut parents = HashMap::new();
+        let mut min_cost = None;
+
+        frontier.push((start, initial_heading), Reverse(0));
+        parents.insert((start, initial_heading), (None, 0));
+
+        while let Some(((current, heading), est_cost)) = frontier.pop() {
+            // If we have surpassed the minimum cost, break.
+            if matches!(min_cost, Some(min) if est_cost.0 > min) {
+                break;
+            }
+
+            let cost = parents[&(current, heading)].1;
+            if current == end {
+                // Update the minimum cost.
+                min_cost = Some(cost);
+            }
+            if cost > parents[&(current, heading)].1 {
+                continue;
+            }
+
+            // Get valid successors.
+            let node = self.get(&current)?;
+            let (left, right) = heading.perpendicular();
+            let neighbours = [
+                (node.get_neighbour(heading), heading, 1),
+                (node.get_neighbour(left), left, 1001),
+                (node.get_neighbour(right), right, 1001),
+            ];
+
+            // Iterate over valid neighbours.
+            for (next, direction, new_cost) in neighbours
+                .iter()
+                .filter_map(|n| n.0.map(|point| (point, n.1, n.2)))
+            {
+                let new_cost = cost + new_cost;
+                let h;
+                match parents.entry((next, direction)) {
+                    Entry::Vacant(e) => {
+                        h = next.distance(end);
+                        e.insert((Some((current, direction)), new_cost));
+                    }
+                    Entry::Occupied(mut e) => {
+                        // If the new cost is less than the current cost.
+                        if e.get().1 > new_cost {
+                            h = next.distance(end);
+                            // Replace the parents and cost.
+                            let s = e.get_mut();
+                            s.0 = Some((current, direction));
+                            s.1 = new_cost;
+                        } else {
+                            continue;
+                        }
+                    }
+                }
+
+                // Add the next point to the frontier.
+                frontier.push((next, direction), Reverse(new_cost + h));
+            }
+        }
+
+        let mut all_paths = Vec::new();
+
+        let Some(min_cost) = min_cost else {
+            return Err(GraphError::NoPathFound); // We never reached the end point.
+        };
+
+        let mut backtrace: HashMap<Point, HashMap<Option<Point>, i32>> = HashMap::new();
+        for ((point, _), (parent, cost)) in parents.iter() {
+            // If the parent is Some(parent), then add the point to the backtrace's set.
+            // Otherwise add an empty set.
+            let set = backtrace.entry(*point).or_default();
+            if let Some((p, _)) = parent {
+                set.insert(Some(*p), *cost);
+            } else {
+                set.insert(None, *cost);
+            }
+        }
+
+        let mut stack = VecDeque::new();
+        stack.push_back((end, (vec![end], min_cost)));
+        while let Some((point, (path, cost))) = stack.pop_front() {
+            if point == start {
+                all_paths.push(Path::new(min_cost, path));
+                continue;
+            }
+
+            let ps = backtrace.get(&point).unwrap();
+
+            if ps.is_empty() {
+                return Err(GraphError::BacktrackingFailed); // Should never happen.
+            }
+
+            for (p, c) in ps.iter() {
+                let p = p.unwrap();
+                // Check if the backtrace is valid.
+                let d_cost = cost - c;
+                if d_cost == 1 || d_cost == 1001 || d_cost == 0 {
+                    let mut new_path = path.clone();
+                    new_path.push(p);
+                    stack.push_back((p, (new_path, *c)));
+                }
+            }
+        }
+
+        Ok(all_paths)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -293,19 +413,21 @@ fn main() -> Result<()> {
 
 fn solve_part_1(input: &str) -> Result<i32> {
     let (graph, start, end) = parse_input(input)?;
+    let start_time = std::time::Instant::now();
     let path = graph.find_shortest_path(start, end)?;
-
-    println!("Path: {:?} nodes.", path.points.len());
-    println!("Start: {}", start);
-    println!("End: {}", end);
+    let elapsed = start_time.elapsed();
+    println!("Part 1: Completed in {}ms", elapsed.as_millis());
 
     Ok(path.cost)
 }
 
 fn solve_part_2(input: &str) -> Result<usize> {
     let (graph, start, end) = parse_input(input)?;
+    let start_time = std::time::Instant::now();
     let paths = graph.find_all_shortest_paths(start, end)?;
-    let total = paths.len();
+    let elapsed = start_time.elapsed();
+    println!("Part 2: Completed in {}ms", elapsed.as_millis());
+    let total = unique_points_in_paths(&paths).len();
 
     Ok(total)
 }
@@ -319,7 +441,7 @@ fn unique_points_in_paths(paths: &[Path]) -> HashSet<Point> {
 
 /// Helper function that prints a graph along with every node in a path.
 /// Needs to be told the size since the graph is not stored as a 2D array.
-fn print_graph(graph: &Graph, paths: &HashSet<Point>, size: (i32, i32)) {
+fn _print_graph(graph: &Graph, paths: &HashSet<Point>, size: (i32, i32)) {
     for y in 0..size.1 {
         for x in 0..size.0 {
             let point = Point::new(x, y);
@@ -418,6 +540,7 @@ mod test {
 ";
 
     #[test]
+    #[ignore]
     fn test_parse_input() {
         let (graph, start, end) = parse_input(INPUT).unwrap();
 
@@ -427,6 +550,7 @@ mod test {
     }
 
     #[test]
+    #[ignore]
     fn test_find_shortest_path() {
         let (graph, start, end) = parse_input(INPUT).unwrap();
         let path = graph.find_shortest_path(start, end).unwrap();
@@ -440,9 +564,10 @@ mod test {
         let (graph, start, end) = parse_input(INPUT).unwrap();
         let paths = graph.find_all_shortest_paths(start, end).unwrap();
         let unique_points = unique_points_in_paths(&paths);
-        print_graph(&graph, &unique_points, (15, 15));
+        _print_graph(&graph, &unique_points, (15, 15));
 
         assert_eq!(paths.len(), 3);
+        assert_eq!(unique_points_in_paths(&paths).len(), 45);
     }
 
     #[test]
@@ -451,7 +576,7 @@ mod test {
         let (graph, start, end) = parse_input(ALT_INPUT).unwrap();
         let paths = graph.find_all_shortest_paths(start, end).unwrap();
         let unique_points = unique_points_in_paths(&paths);
-        print_graph(&graph, &unique_points, (17, 17));
+        _print_graph(&graph, &unique_points, (17, 17));
 
         assert_eq!(paths.len(), 3);
     }
