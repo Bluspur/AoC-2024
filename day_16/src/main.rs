@@ -1,10 +1,30 @@
 use anyhow::Result;
+use image::{ImageBuffer, Rgb};
 use priority_queue::PriorityQueue;
 use std::{
     cmp::Reverse,
     collections::{HashMap, HashSet, VecDeque, hash_map::Entry},
 };
 use thiserror::Error;
+
+const STRAIGHT_COST: i32 = 1;
+const TURN_COST: i32 = 1001;
+
+#[derive(Debug, Error)]
+pub enum GraphError {
+    #[error("Invalid character: {0}")]
+    InvalidCharacter(char),
+    #[error("Start point missing")]
+    MissingStart,
+    #[error("End point missing")]
+    MissingEnd,
+    #[error("No path found")]
+    NoPathFound,
+    #[error("Point not found: {0}")]
+    PointNotFound(Point),
+    #[error("Backtracking failed")]
+    BacktrackingFailed,
+}
 
 // Represents a 2d point in the graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -68,18 +88,6 @@ impl Direction {
             Direction::West => (Direction::South, Direction::North),
         }
     }
-
-    /// Returns whether the direction is perpendicular to the current direction.
-    pub fn is_perpendicular(&self, other: Self) -> bool {
-        match self {
-            Direction::North | Direction::South => {
-                matches!(other, Direction::East | Direction::West)
-            }
-            Direction::East | Direction::West => {
-                matches!(other, Direction::North | Direction::South)
-            }
-        }
-    }
 }
 
 /// A graph representing a 2D grid of nodes.
@@ -87,10 +95,14 @@ impl Direction {
 pub struct Graph {
     /// A map of points to node ids.
     nodes: HashMap<Point, Node>,
+    width: i32,
+    height: i32,
 }
 
 impl Graph {
-    pub fn new(pos_map: HashSet<Point>) -> Self {
+    /// Creates a new graph from a HashSet of points.
+    /// Assumes that the points are connected in a grid-like manner.
+    pub fn new(pos_map: HashSet<Point>, width: i32, height: i32) -> Self {
         let mut nodes = HashMap::new();
         for point in &pos_map {
             // Calculate all the possible neighbour points.
@@ -98,34 +110,26 @@ impl Graph {
             let south = point.neighbour(Direction::South);
             let east = point.neighbour(Direction::East);
             let west = point.neighbour(Direction::West);
+
+            // Helper to map a point to Option if it is a valid point in the graph.
+            let get_direction = |point: Point| -> Option<Point> { pos_map.get(&point).copied() };
+
             // Create a new node.
             // For each neighbour, check if it is a valid point in the graph.
             let node = Node {
-                north: if pos_map.contains(&north) {
-                    Some(north)
-                } else {
-                    None
-                },
-                south: if pos_map.contains(&south) {
-                    Some(south)
-                } else {
-                    None
-                },
-                east: if pos_map.contains(&east) {
-                    Some(east)
-                } else {
-                    None
-                },
-                west: if pos_map.contains(&west) {
-                    Some(west)
-                } else {
-                    None
-                },
+                north: get_direction(north),
+                south: get_direction(south),
+                east: get_direction(east),
+                west: get_direction(west),
             };
 
             nodes.insert(*point, node);
         }
-        Self { nodes }
+        Self {
+            nodes,
+            width,
+            height,
+        }
     }
 
     /// Gets a node at the given point.
@@ -137,218 +141,151 @@ impl Graph {
             .ok_or(GraphError::PointNotFound(*point))
     }
 
-    /// Uses A* algorithm to find the shortest path between two points.
-    /// Returns the shortest path as a Vec of points (Start to End).
-    /// Entering the node in the current direction will be considered as a cost of 1.
-    /// Entering a node 90 degrees to the left or right increases the cost by 1000.
-    /// If no path is found, returns an error.
-    pub fn find_shortest_path(&self, start: Point, end: Point) -> Result<Path, GraphError> {
-        // Check that both start and end points are part of the graph.
-        self.get(&start)?;
-        self.get(&end)?;
-        // Short-circuit if the start and end points are the same.
+    /// Uses a modiiied A* algorithm to find all shortest paths from start to end.
+    /// Returns a vector of paths.
+    /// Heavily inspired by the `astar_bag` function in the `pathfinding` crate.
+    /// https://github.com/evenfurther/pathfinding/blob/main/src/directed/astar.rs#L173
+    fn astar_all_paths(&self, start: Point, end: Point) -> Result<(Vec<Path>, i32), GraphError> {
+        self.get(&start)?; // Check if the start point is valid.
+        self.get(&end)?; // Check if the end point is valid.
         if start == end {
-            return Ok(Path::new(0, vec![start]));
+            return Ok((vec![Path::new(vec![start])], 0));
         }
-        // Initialize the agent's direction as East.
-        let initial_heading = Direction::East;
-        // Initialize the frontier with the start point.
-        let mut frontier = PriorityQueue::new();
-        frontier.push((start, initial_heading), Reverse(0)); // Reverse the priority to get a min-heap.
-        // Initialize a map of nodes with their origins.
-        let mut came_from = HashMap::new();
-        came_from.insert(start, None);
-        // Initialize a map of costs to reach each node.
-        let mut cost_so_far = HashMap::new();
-        cost_so_far.insert(start, 0);
-
-        // While the frontier is not empty.
-        while let Some(((current, heading), _)) = frontier.pop() {
-            // If the current point is the end point, end the search.
-            if current == end {
-                break;
-            }
-
-            let node = self.get(&current)?;
-            let cost = cost_so_far[&current];
-            // Calculate the
-            let (left, right) = heading.perpendicular();
-            let neighbours = [
-                (node.get_neighbour(heading), heading),
-                (node.get_neighbour(left), left),
-                (node.get_neighbour(right), right),
-            ];
-
-            // Iterate over valid neighbours.
-            // Filter out any neighbours that are not part of the graph.
-            for (next, direction) in neighbours
-                .iter()
-                .filter_map(|n| n.0.map(|point| (point, n.1)))
-            {
-                // Calculate the cost to enter the next point.
-                let new_cost = cost + if heading == direction { 1 } else { 1001 };
-
-                // If the next point is not in the cost_so_far map or the new cost is less than the current cost.
-                if !cost_so_far.contains_key(&next) || new_cost < cost_so_far[&next] {
-                    // Update the cost_so_far map with the new cost.
-                    cost_so_far.insert(next, new_cost);
-                    // Calculate the priority of the next point.
-                    let priority = new_cost + next.distance(end);
-                    // Push the next point to the frontier.
-                    frontier.push((next, direction), Reverse(priority));
-                    // Update the came_from map with the current point as the origin of the next point.
-                    came_from.insert(next, Some(current));
-                }
-            }
-        }
-
-        // If the end point is not in the came_from map, then no path was found.
-        let cost = cost_so_far.get(&end).ok_or(GraphError::NoPathFound)?;
-
-        // Get the path from the end to the start.
-        // Reverse the path and store it in a Vec.
-        let mut path = Vec::new();
-        let mut current = end;
-        while let Some(prev) = came_from[&current] {
-            path.push(current);
-            current = prev;
-        }
-        path.push(start);
-        path.reverse();
-
-        Ok(Path::new(*cost, path))
-    }
-
-    fn find_all_shortest_paths(&self, start: Point, end: Point) -> Result<Vec<Path>, GraphError> {
-        // Check that both start and end points are part of the graph.
-        self.get(&start)?;
-        self.get(&end)?;
-        // Short-circuit if the start and end points are the same.
-        if start == end {
-            return Ok(vec![Path::new(0, vec![start])]);
-        }
-        // Initialize the agent's direction as East.
-        let initial_heading = Direction::East;
-
+        let initial_heading = Direction::East; // Always true, per the problem statement.
         let mut frontier = PriorityQueue::new();
         let mut parents = HashMap::new();
-        let mut min_cost = None;
+        let mut min_cost = None; // Minimum cost to reach the end point.
+        frontier.push((start, initial_heading, 0), Reverse(0)); // Reversed for min heap.
+        parents.insert((start, initial_heading), (None, 0)); // Parent, cost.
 
-        frontier.push((start, initial_heading), Reverse(0));
-        parents.insert((start, initial_heading), (None, 0));
-
-        while let Some(((current, heading), est_cost)) = frontier.pop() {
-            // If we have surpassed the minimum cost, break.
+        while let Some(((current, heading, cost), est_cost)) = frontier.pop() {
             if matches!(min_cost, Some(min) if est_cost.0 > min) {
-                break;
+                break; // If the estimated cost is greater than the minimum cost, break.
             }
-
-            let cost = parents[&(current, heading)].1;
+            let parent_cost = parents[&(current, heading)].1;
             if current == end {
-                // Update the minimum cost.
-                min_cost = Some(cost);
+                min_cost = Some(parent_cost); // Update the minimum cost.
             }
-            if cost > parents[&(current, heading)].1 {
-                continue;
+            if cost > parent_cost {
+                continue; // Skip if we've explored this way at a lower cost.
             }
-
-            // Get valid successors.
             let node = self.get(&current)?;
-            let (left, right) = heading.perpendicular();
-            let neighbours = [
-                (node.get_neighbour(heading), heading, 1),
-                (node.get_neighbour(left), left, 1001),
-                (node.get_neighbour(right), right, 1001),
-            ];
+            let neighbours = node.get_neighbours(heading);
 
-            // Iterate over valid neighbours.
             for (next, direction, new_cost) in neighbours
                 .iter()
                 .filter_map(|n| n.0.map(|point| (point, n.1, n.2)))
             {
-                let new_cost = cost + new_cost;
-                let h;
+                let new_cost = parent_cost + new_cost; // New cost to reach the next point.
+                let h = next.distance(end); // Heuristic cost.
                 match parents.entry((next, direction)) {
                     Entry::Vacant(e) => {
-                        h = next.distance(end);
                         e.insert((Some((current, direction)), new_cost));
                     }
-                    Entry::Occupied(mut e) => {
-                        // If the new cost is less than the current cost.
-                        if e.get().1 > new_cost {
-                            h = next.distance(end);
-                            // Replace the parents and cost.
-                            let s = e.get_mut();
-                            s.0 = Some((current, direction));
-                            s.1 = new_cost;
-                        } else {
-                            continue;
-                        }
+                    Entry::Occupied(mut e) if e.get().1 > new_cost => {
+                        *e.get_mut() = (Some((current, direction)), new_cost);
                     }
+                    _ => continue,
                 }
-
-                // Add the next point to the frontier.
-                frontier.push((next, direction), Reverse(new_cost + h));
+                frontier.push((next, direction, new_cost), Reverse(new_cost + h));
             }
         }
+        let min_cost = min_cost.ok_or(GraphError::NoPathFound)?; // If no path was found, return an error.
 
+        // BACKTRACKING
         let mut all_paths = Vec::new();
-
-        let Some(min_cost) = min_cost else {
-            return Err(GraphError::NoPathFound); // We never reached the end point.
-        };
-
         let mut backtrace: HashMap<Point, HashMap<Option<Point>, i32>> = HashMap::new();
         for ((point, _), (parent, cost)) in parents.iter() {
-            // If the parent is Some(parent), then add the point to the backtrace's set.
-            // Otherwise add an empty set.
-            let set = backtrace.entry(*point).or_default();
-            if let Some((p, _)) = parent {
-                set.insert(Some(*p), *cost);
-            } else {
-                set.insert(None, *cost);
-            }
+            backtrace
+                .entry(*point)
+                .or_default() // Create a new HashMap if the point is not in the map.
+                .insert(parent.map(|(p, _)| p), *cost); // Insert the parent and cost.
         }
-
         let mut stack = VecDeque::new();
         stack.push_back((end, (vec![end], min_cost)));
         while let Some((point, (path, cost))) = stack.pop_front() {
             if point == start {
-                all_paths.push(Path::new(min_cost, path));
+                all_paths.push(Path::new(path));
                 continue;
             }
-
             let ps = backtrace.get(&point).unwrap();
-
             if ps.is_empty() {
                 return Err(GraphError::BacktrackingFailed); // Should never happen.
             }
-
             for (p, c) in ps.iter() {
                 let p = p.unwrap();
-                // Check if the backtrace is valid.
-                let d_cost = cost - c;
-                if d_cost == 1 || d_cost == 1001 || d_cost == 0 {
+                // 0 is a hack, it's only needed for the first step.
+                if matches!(cost - c, 0 | STRAIGHT_COST | TURN_COST) {
                     let mut new_path = path.clone();
                     new_path.push(p);
                     stack.push_back((p, (new_path, *c)));
                 }
             }
         }
+        Ok((all_paths, min_cost))
+    }
 
-        Ok(all_paths)
+    /// Helper function that prints a graph along with every node in a path.
+    /// Needs to be told the size since the graph is not stored as a 2D array.
+    pub fn draw(&self, paths: &HashSet<Point>) {
+        for y in 0..self.height {
+            for x in 0..self.width {
+                let point = Point::new(x, y);
+                if paths.contains(&point) {
+                    print!("O");
+                } else if self.nodes.contains_key(&point) {
+                    print!("·"); // Middle Dot not a period.
+                } else {
+                    print!("$");
+                }
+            }
+            println!();
+        }
+        println!();
+    }
+
+    /// Just for fun, draw the graph to a BMP file.
+    pub fn save_bmp(&self, paths: &HashSet<Point>, filename: &str) -> Result<()> {
+        let width = self.width as u32;
+        let height = self.height as u32;
+        let mut img = ImageBuffer::new(width, height);
+
+        for y in 0..height {
+            for x in 0..width {
+                let point = Point::new(x as i32, y as i32);
+                let pixel = if paths.contains(&point) {
+                    Rgb([255u8, 0, 0]) // Red for 'O'
+                } else if self.nodes.contains_key(&point) {
+                    if (x + y) % 2 == 0 {
+                        Rgb([255u8, 255, 255]) // White for '·' on even tiles
+                    } else {
+                        Rgb([200u8, 200, 200]) // Light gray for '·' on odd tiles
+                    }
+                } else {
+                    Rgb([0u8, 0, 0]) // Black for '$'
+                };
+                img.put_pixel(x, y, pixel);
+            }
+        }
+
+        // Create the necessary directories
+        if let Some(parent) = std::path::Path::new(filename).parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        img.save(filename)?;
+        Ok(())
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Default, Clone)]
 pub struct Path {
-    cost: i32,
     points: Vec<Point>,
 }
 
 impl Path {
-    pub fn new(cost: i32, points: Vec<Point>) -> Self {
-        Self { cost, points }
+    pub fn new(points: Vec<Point>) -> Self {
+        Self { points }
     }
 
     pub fn length(&self) -> usize {
@@ -359,22 +296,6 @@ impl Path {
     pub fn to_set(&self) -> HashSet<Point> {
         self.points.iter().copied().collect()
     }
-}
-
-#[derive(Debug, Error)]
-pub enum GraphError {
-    #[error("Invalid character: {0}")]
-    InvalidCharacter(char),
-    #[error("Start point missing")]
-    MissingStart,
-    #[error("End point missing")]
-    MissingEnd,
-    #[error("No path found")]
-    NoPathFound,
-    #[error("Point not found: {0}")]
-    PointNotFound(Point),
-    #[error("Backtracking failed")]
-    BacktrackingFailed,
 }
 
 /// A node in the graph.
@@ -388,8 +309,17 @@ pub struct Node {
 }
 
 impl Node {
-    /// Returns the neighbour in the given direction.
-    pub fn get_neighbour(&self, direction: Direction) -> Option<Point> {
+    /// Returns the neighbours in the given direction.
+    pub fn get_neighbours(&self, direction: Direction) -> [(Option<Point>, Direction, i32); 3] {
+        let (left, right) = direction.perpendicular();
+        [
+            (self.neighbour(direction), direction, STRAIGHT_COST),
+            (self.neighbour(left), left, TURN_COST),
+            (self.neighbour(right), right, TURN_COST),
+        ]
+    }
+
+    fn neighbour(&self, direction: Direction) -> Option<Point> {
         match direction {
             Direction::North => self.north,
             Direction::South => self.south,
@@ -401,35 +331,22 @@ impl Node {
 
 fn main() -> Result<()> {
     let input = std::fs::read_to_string("input.txt")?;
+    let (graph, start, end) = parse_input(&input)?;
+    // Pathfinding benchmarking.
+    let start_time = std::time::Instant::now();
+    let (paths, cost) = graph.astar_all_paths(start, end)?;
+    let elapsed = start_time.elapsed();
+    println!("Pathfinding completed in {}ms", elapsed.as_millis());
 
-    let part_1 = solve_part_1(&input)?;
-    println!("Part 1: {}", part_1);
+    println!("Part 1: {}", cost);
 
-    let part_2 = solve_part_2(&input)?;
-    println!("Part 2: {}", part_2);
+    let unique = unique_points_in_paths(&paths);
+    println!("Part 2: {}", unique.len());
+
+    // Prints the graph as a bmp file.
+    graph.save_bmp(&unique, "images/output.bmp")?;
 
     Ok(())
-}
-
-fn solve_part_1(input: &str) -> Result<i32> {
-    let (graph, start, end) = parse_input(input)?;
-    let start_time = std::time::Instant::now();
-    let path = graph.find_shortest_path(start, end)?;
-    let elapsed = start_time.elapsed();
-    println!("Part 1: Completed in {}ms", elapsed.as_millis());
-
-    Ok(path.cost)
-}
-
-fn solve_part_2(input: &str) -> Result<usize> {
-    let (graph, start, end) = parse_input(input)?;
-    let start_time = std::time::Instant::now();
-    let paths = graph.find_all_shortest_paths(start, end)?;
-    let elapsed = start_time.elapsed();
-    println!("Part 2: Completed in {}ms", elapsed.as_millis());
-    let total = unique_points_in_paths(&paths).len();
-
-    Ok(total)
 }
 
 fn unique_points_in_paths(paths: &[Path]) -> HashSet<Point> {
@@ -439,34 +356,19 @@ fn unique_points_in_paths(paths: &[Path]) -> HashSet<Point> {
         .collect()
 }
 
-/// Helper function that prints a graph along with every node in a path.
-/// Needs to be told the size since the graph is not stored as a 2D array.
-fn _print_graph(graph: &Graph, paths: &HashSet<Point>, size: (i32, i32)) {
-    for y in 0..size.1 {
-        for x in 0..size.0 {
-            let point = Point::new(x, y);
-            if paths.contains(&point) {
-                print!("O");
-            } else if graph.nodes.contains_key(&point) {
-                print!("·"); // Middle Dot not a period.
-            } else {
-                print!("$");
-            }
-        }
-        println!();
-    }
-    println!();
-}
-
 pub fn parse_input(input: &str) -> Result<(Graph, Point, Point), GraphError> {
     // Start by normalizing line endings to \n.
     let s = input.replace("\r\n", "\n");
     let mut pos_map = HashSet::new();
     let mut start = None;
     let mut end = None;
+    let mut width = 0;
+    let mut height = 0;
 
     for (y, line) in s.trim().lines().enumerate() {
+        height = y;
         for (x, c) in line.trim().char_indices() {
+            width = x;
             let point = Point::new(x as i32, y as i32);
             match c {
                 // Empty Space
@@ -489,19 +391,21 @@ pub fn parse_input(input: &str) -> Result<(Graph, Point, Point), GraphError> {
             }
         }
     }
-
     // Check if start and end points are present.
     let start = start.ok_or(GraphError::MissingStart)?;
     let end = end.ok_or(GraphError::MissingEnd)?;
-
-    Ok((Graph::new(pos_map), start, end))
+    Ok((
+        Graph::new(pos_map, (width + 1) as i32, (height + 1) as i32),
+        start,
+        end,
+    ))
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
 
-    const INPUT: &str = r"
+    const INPUT_ONE: &str = r"
         ###############
         #.......#....E#
         #.#.###.#.###.#
@@ -519,7 +423,7 @@ mod test {
         ###############
     ";
 
-    const ALT_INPUT: &str = r"
+    const INPUT_TWO: &str = r"
         #################
         #...#...#...#..E#
         #.#.#.#.#.#.#.#.#
@@ -540,9 +444,8 @@ mod test {
 ";
 
     #[test]
-    #[ignore]
     fn test_parse_input() {
-        let (graph, start, end) = parse_input(INPUT).unwrap();
+        let (graph, start, end) = parse_input(INPUT_ONE).unwrap();
 
         assert_eq!(start, Point::new(1, 13));
         assert_eq!(end, Point::new(13, 1));
@@ -550,34 +453,22 @@ mod test {
     }
 
     #[test]
-    #[ignore]
-    fn test_find_shortest_path() {
-        let (graph, start, end) = parse_input(INPUT).unwrap();
-        let path = graph.find_shortest_path(start, end).unwrap();
+    fn test_pathfinding() {
+        let (g1, s1, e1) = parse_input(INPUT_ONE).unwrap();
+        let (g2, s2, e2) = parse_input(INPUT_TWO).unwrap();
+        let p1 = g1.astar_all_paths(s1, e1).expect("Expected a path");
+        let p2 = g2.astar_all_paths(s2, e2).expect("Expected a path");
 
-        assert_eq!(path.points.len(), 37); // Includes start and end points.
-        assert_eq!(path.cost, 7036);
-    }
-
-    #[test]
-    fn test_find_all_shortest_paths() {
-        let (graph, start, end) = parse_input(INPUT).unwrap();
-        let paths = graph.find_all_shortest_paths(start, end).unwrap();
-        let unique_points = unique_points_in_paths(&paths);
-        _print_graph(&graph, &unique_points, (15, 15));
-
-        assert_eq!(paths.len(), 3);
-        assert_eq!(unique_points_in_paths(&paths).len(), 45);
-    }
-
-    #[test]
-    #[ignore]
-    fn test_find_all_shortest_paths_alt() {
-        let (graph, start, end) = parse_input(ALT_INPUT).unwrap();
-        let paths = graph.find_all_shortest_paths(start, end).unwrap();
-        let unique_points = unique_points_in_paths(&paths);
-        _print_graph(&graph, &unique_points, (17, 17));
-
-        assert_eq!(paths.len(), 3);
+        // Check that the number of paths are correct.
+        assert_eq!(p1.0.len(), 3, "Expected {} paths, got {}", 3, p1.0.len());
+        assert_eq!(p2.0.len(), 2, "Expected {} paths, got {}", 3, p2.0.len());
+        // Check that the cost of the shortest path is correct.
+        assert_eq!(p1.1, 7036, "Expected cost {}, got {}", 7036, p1.1);
+        assert_eq!(p2.1, 11048, "Expected cost {}, got {}", 11048, p2.1);
+        // Check that the number of unique points in the paths are correct.
+        let u1 = unique_points_in_paths(&p1.0);
+        let u2 = unique_points_in_paths(&p2.0);
+        assert_eq!(u1.len(), 45, "Expected {} points, got {}", 45, u1.len());
+        assert_eq!(u2.len(), 64, "Expected {} points, got {}", 64, u2.len());
     }
 }
